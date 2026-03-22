@@ -1,0 +1,55 @@
+experiment:
+  name: egogazevqa_qwen_proactive_gaze
+  dataset_kind: egogazevqa
+  output_dir: outputs/egogazevqa_qwen_proactive_gaze
+  dry_run: false
+  save_prompts: true
+  resume: false
+
+data:
+  dataset_dir: dataset/egogazevqa
+  split: all
+  task: qa
+  limit: 20
+  seed: 42
+  manifest_path: outputs/egogazevqa_manifest.jsonl
+  metadata_path: null
+  narration_dir: null
+  video_root: null
+  cache_dir: outputs/egogazevqa_qwen_proactive_gaze/_decoded_frames
+  skip_missing_images: true
+  allow_sparse_window: true
+  native_fps: 30
+
+prompt:
+  variant: proactive_gaze
+  mode: proactive_window
+  window_seconds: 5
+  sample_fps: 1
+  max_frames: 6
+  image_max_pixels: 200704
+  include_gaze_text: true
+  max_gaze_points: 1
+  include_object_inventory: false
+  include_primary_function: false
+  icl_examples_per_prompt: 0
+  silence_token: <SILENCE>
+  allow_silence: false
+  prediction_box_format: yxyx
+
+api:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: QWEN_API_KEY
+  model: qwen3-vl-8b-thinking
+  temperature: 0.1
+  max_tokens: 256
+  timeout_s: 90
+  sample_timeout_s: 120
+  stream: false
+  max_retries: 2
+
+evaluation:
+  iou_thresholds: [0.3, 0.5]
+  export_visualizations: true
+  visualization_limit: 20
+  proxy_box_size_ratio: 0.18

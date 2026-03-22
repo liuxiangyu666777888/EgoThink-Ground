@@ -1,0 +1,47 @@
+experiment:
+  name: egogazevqa_qwen_baseline
+  dataset_kind: egogazevqa
+  output_dir: outputs/egogazevqa_qwen_baseline
+  dry_run: true
+  save_prompts: true
+  resume: false
+
+data:
+  dataset_dir: dataset/egogazevqa
+  split: all
+  task: qa
+  limit: 20
+  seed: 42
+  manifest_path: null
+  metadata_path: null
+  narration_dir: null
+  video_root: null
+  cache_dir: outputs/egogazevqa_qwen_baseline/_decoded_frames
+  skip_missing_images: true
+  allow_sparse_window: true
+  native_fps: 30
+
+prompt:
+  variant: baseline
+  mode: video_multiframe
+  max_frames: 8
+  image_max_pixels: 200704
+  include_gaze_text: false
+  max_gaze_points: 8
+  include_object_inventory: false
+  include_primary_function: false
+  icl_examples_per_prompt: 0
+
+api:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: QWEN_API_KEY
+  model: Qwen3-VL-8B-Thinking
+  temperature: 0.1
+  max_tokens: 128
+  timeout_s: 180
+  stream: false
+
+evaluation:
+  iou_thresholds: [0.5]
+  export_visualizations: false
+  visualization_limit: 0

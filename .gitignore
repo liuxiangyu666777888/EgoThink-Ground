@@ -1,0 +1,15 @@
+dataset/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.venv/
+venv/
+
+outputs/*/_decoded_frames/
+outputs/*/visualizations/
+
+总结.md
+实验说明.md

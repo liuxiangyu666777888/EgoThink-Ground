@@ -1,0 +1,49 @@
+experiment:
+  name: qwen3_vl_rog_test200
+  output_dir: outputs/qwen3_vl_rog_test200
+  dry_run: false
+  save_prompts: true
+  resume: false
+
+data:
+  dataset_dir: dataset
+  split: test
+  task: both
+  limit: 20
+  seed: 42
+  manifest_path: null
+  frame_roots:
+    - dataset/paco_frames
+  path_replacements:
+    /mnt/data/paco/v1/paco_frames: dataset/paco_frames
+  skip_missing_images: true
+  allow_sparse_window: true
+  native_fps: 30
+
+prompt:
+  variant: rog_thinking
+  mode: sliding_window
+  window_seconds: 8
+  sample_fps: 1
+  max_frames: 8
+  image_max_pixels: 200704
+  include_object_inventory: true
+  include_primary_function: true
+  icl_examples_per_prompt: 0
+  silence_token: <SILENCE>
+  prediction_box_format: xyxy
+
+api:
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: QWEN_API_KEY
+  model: Qwen3-VL-8B-Thinking
+  temperature: 0.1
+  max_tokens: 512
+  timeout_s: 180
+  stream: false
+
+evaluation:
+  iou_thresholds: [0.3, 0.5]
+  temporal_annotations_path: null
+  export_visualizations: false
+  visualization_limit: 20
