@@ -34,7 +34,7 @@ prompt:
   include_primary_function: false
   icl_examples_per_prompt: 0
   silence_token: <SILENCE>
-  allow_silence: false
+  allow_silence: true
   prediction_box_format: yxyx
 
 api:
@@ -52,4 +52,26 @@ evaluation:
   iou_thresholds: [0.3, 0.5]
   export_visualizations: true
   visualization_limit: 20
-  proxy_box_size_ratio: 0.18
+  proxy_box_size_ratio: 0.15
+
+judge:
+  enable_intent_judge: true
+  model: qwen3-vl-8b-thinking
+  temperature: 0.0
+  max_tokens: 160
+
+redundancy:
+  enable_frame_filtering: true
+  optical_flow_threshold: 1.25
+  hsv_hist_similarity_threshold: 0.985
+  analysis_resize_width: 320
+  min_frames_after_filter: 2
+  inspect_probe_limit: 25
+  low_dynamic_flow_threshold: 0.75
+  low_dynamic_hist_similarity_threshold: 0.992
+  low_dynamic_gaze_shift_threshold: 0.015
+  low_dynamic_redundancy_ratio_threshold: 0.6
+  skip_low_dynamic_samples: false
+  pre_api_silence_on_low_dynamic: true
+  enable_lsfu: true
+  lsfu_threshold: 1.55

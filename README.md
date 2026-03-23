@@ -3,7 +3,6 @@
 当前仓库支持两条实验线：
 
 - `egogazevqa`：主线，基于 EgoGazeVQA 的第一视角视频意图推理 / 视频问答
-- `egointention`：保留的 legacy grounding 管线
 
 ## 当前主线
 
@@ -120,9 +119,6 @@ python run_experiment.py --config <config_path> <command>
 - [configs/egogazevqa_proactive_gaze.yaml](C:\Users\Administrator\Desktop\SOTA\configs\egogazevqa_proactive_gaze.yaml)
 - [configs/egogazevqa_proactive_baseline.yaml](C:\Users\Administrator\Desktop\SOTA\configs\egogazevqa_proactive_baseline.yaml)
 
-Legacy：
-
-- [configs/qwen_rog.yaml](C:\Users\Administrator\Desktop\SOTA\configs\qwen_rog.yaml)
 
 ## 推荐流程
 

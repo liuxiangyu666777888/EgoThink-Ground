@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -9,7 +10,15 @@ from pathlib import Path
 from typing import Any
 
 import imageio.v2 as imageio
+import numpy as np
+from PIL import Image
 
+try:
+    import cv2
+except ImportError:  # pragma: no cover - optional dependency fallback
+    cv2 = None
+
+from .config import RedundancyConfig
 
 VIDEO_REF_RE = re.compile(r"(?P<dataset>ego4d|egoexo|egtea)[/\\](?P<video_id>[^/\\]+)[/\\](?P<start>\d+)_(?P<end>\d+)\.mp4$", re.IGNORECASE)
 FULL_VIDEO_REF_RE = re.compile(r"(?P<dataset>ego4d|egoexo|egtea)[/\\](?P<video_id>[^/\\]+)[/\\](?P<basename>[^/\\]+)\.mp4$", re.IGNORECASE)
@@ -70,6 +79,60 @@ class EgoGazeVQASample:
             ],
         }
 
+
+@dataclass
+class TemporalWindowAnalysis:
+    original_frame_count: int
+    kept_frame_count: int
+    filtered_frame_count: int
+    redundant_pair_count: int
+    mean_optical_flow: float | None
+    mean_hsv_hist_similarity: float | None
+    mean_gaze_shift_norm: float | None
+    redundancy_ratio: float
+    low_dynamic: bool
+    low_dynamic_reason: str | None
+    lsfu_score: float | None
+    pair_metrics: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "original_frame_count": self.original_frame_count,
+            "kept_frame_count": self.kept_frame_count,
+            "filtered_frame_count": self.filtered_frame_count,
+            "redundant_pair_count": self.redundant_pair_count,
+            "mean_optical_flow": self.mean_optical_flow,
+            "mean_hsv_hist_similarity": self.mean_hsv_hist_similarity,
+            "mean_gaze_shift_norm": self.mean_gaze_shift_norm,
+            "redundancy_ratio": self.redundancy_ratio,
+            "low_dynamic": self.low_dynamic,
+            "low_dynamic_reason": self.low_dynamic_reason,
+            "lsfu_score": self.lsfu_score,
+            "pair_metrics": self.pair_metrics,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TemporalWindowAnalysis":
+        return cls(
+            original_frame_count=int(payload.get("original_frame_count", 0) or 0),
+            kept_frame_count=int(payload.get("kept_frame_count", 0) or 0),
+            filtered_frame_count=int(payload.get("filtered_frame_count", 0) or 0),
+            redundant_pair_count=int(payload.get("redundant_pair_count", 0) or 0),
+            mean_optical_flow=float(payload["mean_optical_flow"]) if payload.get("mean_optical_flow") is not None else None,
+            mean_hsv_hist_similarity=(
+                float(payload["mean_hsv_hist_similarity"])
+                if payload.get("mean_hsv_hist_similarity") is not None
+                else None
+            ),
+            mean_gaze_shift_norm=(
+                float(payload["mean_gaze_shift_norm"]) if payload.get("mean_gaze_shift_norm") is not None else None
+            ),
+            redundancy_ratio=float(payload.get("redundancy_ratio", 0.0) or 0.0),
+            low_dynamic=bool(payload.get("low_dynamic")),
+            low_dynamic_reason=str(payload.get("low_dynamic_reason")) if payload.get("low_dynamic_reason") else None,
+            lsfu_score=float(payload["lsfu_score"]) if payload.get("lsfu_score") is not None else None,
+            pair_metrics=list(payload.get("pair_metrics") or []),
+        )
 
 def _normalize_split(value: str | None) -> str:
     return value.strip().lower() if value else "train"
@@ -264,6 +327,254 @@ class EgoGazeVQADataset:
         }
 
 
+def _safe_mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _redundancy_mode_tag(config: RedundancyConfig | None) -> str:
+    if config is None:
+        return "red0"
+    return (
+        "red"
+        f"_f{int(config.enable_frame_filtering)}"
+        f"_of{int(round(config.optical_flow_threshold * 100))}"
+        f"_hs{int(round(config.hsv_hist_similarity_threshold * 1000))}"
+        f"_lf{int(round(config.low_dynamic_flow_threshold * 100))}"
+        f"_lh{int(round(config.low_dynamic_hist_similarity_threshold * 1000))}"
+        f"_lg{int(round(config.low_dynamic_gaze_shift_threshold * 10000))}"
+        f"_mw{max(1, int(config.analysis_resize_width))}"
+    )
+
+
+def _resize_analysis_frame(frame_array: Any, resize_width: int) -> np.ndarray:
+    rgb = np.asarray(frame_array)
+    if rgb.ndim == 2:
+        rgb = np.stack([rgb] * 3, axis=-1)
+    if rgb.shape[-1] == 4:
+        rgb = rgb[..., :3]
+    rgb = rgb.astype(np.uint8, copy=False)
+    if resize_width <= 0 or rgb.shape[1] <= resize_width:
+        return rgb
+    scale = resize_width / float(rgb.shape[1])
+    resize_height = max(1, int(round(rgb.shape[0] * scale)))
+    if cv2 is not None:
+        return cv2.resize(rgb, (resize_width, resize_height), interpolation=cv2.INTER_AREA)
+    image = Image.fromarray(rgb)
+    resized = image.resize((resize_width, resize_height), Image.Resampling.BILINEAR)
+    return np.asarray(resized)
+
+
+def _optical_flow_magnitude(prev_rgb: np.ndarray, curr_rgb: np.ndarray) -> float:
+    if cv2 is None:
+        prev_gray = prev_rgb.mean(axis=2).astype(np.float32)
+        curr_gray = curr_rgb.mean(axis=2).astype(np.float32)
+        return float(np.mean(np.abs(curr_gray - prev_gray)) / 255.0 * 10.0)
+
+    prev_gray = cv2.cvtColor(prev_rgb, cv2.COLOR_RGB2GRAY)
+    curr_gray = cv2.cvtColor(curr_rgb, cv2.COLOR_RGB2GRAY)
+    corners = cv2.goodFeaturesToTrack(
+        prev_gray,
+        maxCorners=128,
+        qualityLevel=0.01,
+        minDistance=7,
+        blockSize=7,
+    )
+    if corners is None or len(corners) == 0:
+        return float(np.mean(np.abs(curr_gray.astype(np.float32) - prev_gray.astype(np.float32))) / 255.0 * 10.0)
+
+    next_points, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, curr_gray, corners, None)
+    if next_points is None or status is None:
+        return 0.0
+    good_prev = corners[status.flatten() == 1]
+    good_next = next_points[status.flatten() == 1]
+    if len(good_prev) == 0 or len(good_next) == 0:
+        return 0.0
+    displacements = np.linalg.norm(good_next - good_prev, axis=2)
+    return float(np.median(displacements))
+
+
+def _hsv_hist_similarity(prev_rgb: np.ndarray, curr_rgb: np.ndarray) -> float:
+    if cv2 is None:
+        prev_hist, _ = np.histogram(prev_rgb.reshape(-1, 3), bins=32, range=(0, 255), density=True)
+        curr_hist, _ = np.histogram(curr_rgb.reshape(-1, 3), bins=32, range=(0, 255), density=True)
+        if np.std(prev_hist) == 0 or np.std(curr_hist) == 0:
+            return 1.0 if np.allclose(prev_hist, curr_hist) else 0.0
+        return float(np.corrcoef(prev_hist, curr_hist)[0, 1])
+
+    prev_hsv = cv2.cvtColor(prev_rgb, cv2.COLOR_RGB2HSV)
+    curr_hsv = cv2.cvtColor(curr_rgb, cv2.COLOR_RGB2HSV)
+    prev_hist = cv2.calcHist([prev_hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
+    curr_hist = cv2.calcHist([curr_hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
+    cv2.normalize(prev_hist, prev_hist)
+    cv2.normalize(curr_hist, curr_hist)
+    return float(cv2.compareHist(prev_hist, curr_hist, cv2.HISTCMP_CORREL))
+
+
+def _nearest_gaze_point(sample: EgoGazeVQASample, source_frame: int) -> GazePoint | None:
+    if not sample.gaze_sequence:
+        return None
+    return min(sample.gaze_sequence, key=lambda point: abs(point.frame - source_frame))
+
+
+def _gaze_shift_norm(sample: EgoGazeVQASample, prev_source_frame: int, curr_source_frame: int) -> float | None:
+    prev_gaze = _nearest_gaze_point(sample, prev_source_frame)
+    curr_gaze = _nearest_gaze_point(sample, curr_source_frame)
+    if prev_gaze is None or curr_gaze is None:
+        return None
+    if prev_gaze.x is None or prev_gaze.y is None or curr_gaze.x is None or curr_gaze.y is None:
+        return None
+    delta = math.hypot(float(curr_gaze.x) - float(prev_gaze.x), float(curr_gaze.y) - float(prev_gaze.y))
+    return float(delta / math.sqrt(2.0))
+
+
+def _compute_lsfu_score(
+    config: RedundancyConfig,
+    mean_flow: float | None,
+    mean_hist_similarity: float | None,
+    mean_gaze_shift_norm: float | None,
+    redundancy_ratio: float,
+) -> float:
+    flow_threshold = max(config.low_dynamic_flow_threshold, 1e-6)
+    hist_threshold = config.low_dynamic_hist_similarity_threshold
+    gaze_threshold = max(config.low_dynamic_gaze_shift_threshold, 1e-6)
+    flow_component = max(0.0, (flow_threshold - float(mean_flow or 0.0)) / flow_threshold)
+    hist_component = 0.0
+    if mean_hist_similarity is not None:
+        hist_component = max(
+            0.0,
+            (float(mean_hist_similarity) - hist_threshold) / max(1e-6, 1.0 - hist_threshold),
+        )
+    gaze_component = 0.5 if mean_gaze_shift_norm is None else max(
+        0.0,
+        (gaze_threshold - float(mean_gaze_shift_norm)) / gaze_threshold,
+    )
+    raw_score = 1.0 + 2.6 * flow_component + 2.4 * hist_component + 1.5 * gaze_component + 1.5 * redundancy_ratio
+    return float(math.log1p(raw_score))
+
+
+def _analyze_temporal_window(
+    frame_pairs: list[tuple[int, Any]],
+    sample: EgoGazeVQASample,
+    config: RedundancyConfig | None,
+) -> tuple[list[tuple[int, Any]], TemporalWindowAnalysis]:
+    if not frame_pairs:
+        summary = TemporalWindowAnalysis(
+            original_frame_count=0,
+            kept_frame_count=0,
+            filtered_frame_count=0,
+            redundant_pair_count=0,
+            mean_optical_flow=None,
+            mean_hsv_hist_similarity=None,
+            mean_gaze_shift_norm=None,
+            redundancy_ratio=0.0,
+            low_dynamic=False,
+            low_dynamic_reason=None,
+            lsfu_score=None,
+            pair_metrics=[],
+        )
+        return [], summary
+
+    if config is None:
+        config = RedundancyConfig()
+
+    kept: list[tuple[int, Any]] = [frame_pairs[0]]
+    pair_metrics: list[dict[str, Any]] = []
+    motion_values: list[float] = []
+    hist_values: list[float] = []
+    gaze_values: list[float] = []
+    redundant_pair_count = 0
+
+    for idx in range(1, len(frame_pairs)):
+        prev_clip_index, prev_frame = kept[-1]
+        curr_clip_index, curr_frame = frame_pairs[idx]
+        prev_rgb = _resize_analysis_frame(prev_frame, config.analysis_resize_width)
+        curr_rgb = _resize_analysis_frame(curr_frame, config.analysis_resize_width)
+        motion_score = _optical_flow_magnitude(prev_rgb, curr_rgb)
+        hist_similarity = _hsv_hist_similarity(prev_rgb, curr_rgb)
+        prev_source_frame = sample.start_frame + int(prev_clip_index)
+        curr_source_frame = sample.start_frame + int(curr_clip_index)
+        gaze_shift_norm = _gaze_shift_norm(sample, prev_source_frame, curr_source_frame)
+        is_redundant = (
+            motion_score < config.optical_flow_threshold
+            and hist_similarity >= config.hsv_hist_similarity_threshold
+        )
+        pair_metrics.append(
+            {
+                "prev_clip_index": int(prev_clip_index),
+                "curr_clip_index": int(curr_clip_index),
+                "prev_source_frame": int(prev_source_frame),
+                "curr_source_frame": int(curr_source_frame),
+                "optical_flow": motion_score,
+                "hsv_hist_similarity": hist_similarity,
+                "gaze_shift_norm": gaze_shift_norm,
+                "redundant": is_redundant,
+            }
+        )
+        motion_values.append(motion_score)
+        hist_values.append(hist_similarity)
+        if gaze_shift_norm is not None:
+            gaze_values.append(gaze_shift_norm)
+        if is_redundant:
+            redundant_pair_count += 1
+        if not config.enable_frame_filtering or not is_redundant or idx == len(frame_pairs) - 1:
+            kept.append((curr_clip_index, curr_frame))
+
+    required_frames = min(len(frame_pairs), max(1, config.min_frames_after_filter))
+    if len(kept) < required_frames:
+        selected_indices = {int(item[0]) for item in kept}
+        for candidate in reversed(frame_pairs):
+            if int(candidate[0]) in selected_indices:
+                continue
+            kept.append(candidate)
+            selected_indices.add(int(candidate[0]))
+            if len(kept) >= required_frames:
+                break
+        kept.sort(key=lambda item: int(item[0]))
+
+    original_count = len(frame_pairs)
+    kept_count = len(kept)
+    filtered_count = max(0, original_count - kept_count)
+    redundancy_ratio = redundant_pair_count / max(1, original_count - 1) if original_count > 1 else 0.0
+    mean_flow = _safe_mean(motion_values)
+    mean_hist = _safe_mean(hist_values)
+    mean_gaze = _safe_mean(gaze_values)
+    visual_static = (
+        mean_flow is not None
+        and mean_hist is not None
+        and mean_flow <= config.low_dynamic_flow_threshold
+        and mean_hist >= config.low_dynamic_hist_similarity_threshold
+    )
+    gaze_static = mean_gaze is None or mean_gaze <= config.low_dynamic_gaze_shift_threshold
+    redundancy_high = redundancy_ratio >= config.low_dynamic_redundancy_ratio_threshold
+    low_dynamic = bool(visual_static and gaze_static and (redundancy_high or original_count <= required_frames))
+    reasons: list[str] = []
+    if visual_static:
+        reasons.append("visual_static")
+    if gaze_static:
+        reasons.append("gaze_static")
+    if redundancy_high:
+        reasons.append("high_redundancy")
+    lsfu_score = _compute_lsfu_score(config, mean_flow, mean_hist, mean_gaze, redundancy_ratio)
+
+    summary = TemporalWindowAnalysis(
+        original_frame_count=original_count,
+        kept_frame_count=kept_count,
+        filtered_frame_count=filtered_count,
+        redundant_pair_count=redundant_pair_count,
+        mean_optical_flow=mean_flow,
+        mean_hsv_hist_similarity=mean_hist,
+        mean_gaze_shift_norm=mean_gaze,
+        redundancy_ratio=redundancy_ratio,
+        low_dynamic=low_dynamic,
+        low_dynamic_reason=",".join(reasons) if reasons else None,
+        lsfu_score=lsfu_score,
+        pair_metrics=pair_metrics,
+    )
+    return kept, summary
+
+
 def select_egogazevqa_examples(
     examples: list[EgoGazeVQASample],
     limit: int | None,
@@ -363,16 +674,32 @@ def decode_sampled_frames(
     source_fps: int = 30,
     sample_fps: int = 1,
     tail_only: bool = False,
-) -> list[VideoFrame]:
+    redundancy_config: RedundancyConfig | None = None,
+) -> tuple[list[VideoFrame], TemporalWindowAnalysis]:
     if not sample.video_path.exists():
-        return []
+        return [], TemporalWindowAnalysis(
+            original_frame_count=0,
+            kept_frame_count=0,
+            filtered_frame_count=0,
+            redundant_pair_count=0,
+            mean_optical_flow=None,
+            mean_hsv_hist_similarity=None,
+            mean_gaze_shift_norm=None,
+            redundancy_ratio=0.0,
+            low_dynamic=False,
+            low_dynamic_reason=None,
+            lsfu_score=None,
+            pair_metrics=[],
+        )
 
     mode_tag = f"tail_w{window_seconds or 0}_sf{sample_fps}" if tail_only else "uniform"
+    mode_tag = f"{mode_tag}_{_redundancy_mode_tag(redundancy_config)}"
     sample_cache = cache_dir / f"{re.sub(r'[^a-zA-Z0-9._-]+', '_', sample.sample_id)}__{mode_tag}_f{max_frames}"
     sample_cache.mkdir(parents=True, exist_ok=True)
+    summary_path = sample_cache / "window_analysis.json"
 
     existing = sorted(sample_cache.glob("*.jpg"))
-    if existing:
+    if existing and summary_path.exists():
         frames: list[VideoFrame] = []
         for path in existing:
             match = re.match(r"(?P<clip>\d{4})_f(?P<frame>\d+)\.jpg$", path.name)
@@ -386,7 +713,8 @@ def decode_sampled_frames(
                 )
             )
         if frames:
-            return frames
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            return frames, TemporalWindowAnalysis.from_dict(payload)
 
     try:
         reader = imageio.get_reader(str(sample.video_path))
@@ -409,7 +737,7 @@ def decode_sampled_frames(
             sample_fps=sample_fps,
             tail_only=tail_only,
         )
-        return _write_sampled_frames(sample_cache, materialized, indices, sample)
+        return _write_sampled_frames(sample_cache, materialized, indices, sample, redundancy_config)
 
     indices = _temporal_window_indices(
         frame_count,
@@ -426,7 +754,7 @@ def decode_sampled_frames(
         except Exception:
             continue
     reader.close()
-    return _write_sampled_frames(sample_cache, frames, None, sample)
+    return _write_sampled_frames(sample_cache, frames, None, sample, redundancy_config)
 
 
 def _write_sampled_frames(
@@ -434,17 +762,23 @@ def _write_sampled_frames(
     frames_or_materialized: list[Any],
     indices: list[int] | None,
     sample: EgoGazeVQASample,
-) -> list[VideoFrame]:
+    redundancy_config: RedundancyConfig | None,
+) -> tuple[list[VideoFrame], TemporalWindowAnalysis]:
     if indices is None:
         frame_pairs = frames_or_materialized
     else:
         frame_pairs = [(idx, frames_or_materialized[idx]) for idx in indices]
+    filtered_pairs, summary = _analyze_temporal_window(frame_pairs, sample, redundancy_config)
     result: list[VideoFrame] = []
-    for clip_index, frame_array in frame_pairs:
+    for clip_index, frame_array in filtered_pairs:
         if isinstance(frame_array, tuple):
             clip_index, frame_array = frame_array
         source_frame = sample.start_frame + int(clip_index)
         output_path = sample_cache / f"{int(clip_index):04d}_f{int(source_frame)}.jpg"
         imageio.imwrite(output_path, frame_array)
         result.append(VideoFrame(path=output_path, clip_index=int(clip_index), source_frame=int(source_frame)))
-    return result
+    (sample_cache / "window_analysis.json").write_text(
+        json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return result, summary

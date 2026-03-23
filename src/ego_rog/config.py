@@ -33,7 +33,7 @@ def _resolve_path_list(base_dir: Path, values: list[str]) -> list[Path]:
 @dataclass
 class ExperimentConfig:
     name: str = "qwen3_vl_rog"
-    dataset_kind: str = "egointention"
+    dataset_kind: str = "egogazevqa"
     output_dir: Path = Path("outputs/qwen3_vl_rog")
     dry_run: bool = False
     save_prompts: bool = True
@@ -104,12 +104,40 @@ class EvaluationConfig:
 
 
 @dataclass
+class JudgeConfig:
+    enable_intent_judge: bool = False
+    model: str | None = None
+    temperature: float = 0.0
+    max_tokens: int = 160
+
+
+@dataclass
+class RedundancyConfig:
+    enable_frame_filtering: bool = False
+    optical_flow_threshold: float = 1.25
+    hsv_hist_similarity_threshold: float = 0.985
+    analysis_resize_width: int = 320
+    min_frames_after_filter: int = 2
+    inspect_probe_limit: int = 25
+    low_dynamic_flow_threshold: float = 0.75
+    low_dynamic_hist_similarity_threshold: float = 0.992
+    low_dynamic_gaze_shift_threshold: float = 0.015
+    low_dynamic_redundancy_ratio_threshold: float = 0.6
+    skip_low_dynamic_samples: bool = False
+    pre_api_silence_on_low_dynamic: bool = False
+    enable_lsfu: bool = False
+    lsfu_threshold: float = 1.55
+
+
+@dataclass
 class AppConfig:
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     data: DataConfig = field(default_factory=DataConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     api: APIConfig = field(default_factory=APIConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    judge: JudgeConfig = field(default_factory=JudgeConfig)
+    redundancy: RedundancyConfig = field(default_factory=RedundancyConfig)
 
     @classmethod
     def from_file(cls, path: str | Path) -> "AppConfig":
@@ -136,6 +164,8 @@ class AppConfig:
         prompt = PromptConfig(**raw.get("prompt", {}))
         api = APIConfig(**raw.get("api", {}))
         evaluation = EvaluationConfig(**raw.get("evaluation", {}))
+        judge = JudgeConfig(**raw.get("judge", {}))
+        redundancy = RedundancyConfig(**raw.get("redundancy", {}))
         if evaluation.temporal_annotations_path:
             evaluation.temporal_annotations_path = _resolve_path(base_dir, str(evaluation.temporal_annotations_path))
 
@@ -145,6 +175,8 @@ class AppConfig:
             prompt=prompt,
             api=api,
             evaluation=evaluation,
+            judge=judge,
+            redundancy=redundancy,
         )
 
     def as_dict(self) -> dict[str, Any]:

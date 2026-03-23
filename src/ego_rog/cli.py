@@ -5,12 +5,11 @@ from pathlib import Path
 
 from .config import AppConfig
 from .egogazevqa_runner import EgoGazeVQARunner
-from .runner import ExperimentRunner
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Experiment runner for EgoIntention and EgoGazeVQA")
-    parser.add_argument("--config", default="configs/qwen_rog.yaml", help="Path to YAML config")
+    parser = argparse.ArgumentParser(description="Experiment runner for EgoGazeVQA proactive reasoning")
+    parser.add_argument("--config", default="configs/egogazevqa_proactive_gaze.yaml", help="Path to YAML config")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("inspect", help="Inspect dataset and local frame coverage")
@@ -54,6 +53,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_runner(config: AppConfig):
-    if config.experiment.dataset_kind == "egogazevqa":
-        return EgoGazeVQARunner(config)
-    return ExperimentRunner(config)
+    if config.experiment.dataset_kind != "egogazevqa":
+        raise ValueError(f"Unsupported dataset_kind: {config.experiment.dataset_kind}")
+    return EgoGazeVQARunner(config)

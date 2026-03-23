@@ -1,7 +1,7 @@
 experiment:
-  name: egogazevqa_qwen_proactive_baseline
+  name: egogazevqa_qwen_proactive_gaze_streaming
   dataset_kind: egogazevqa
-  output_dir: outputs/egogazevqa_qwen_proactive_baseline
+  output_dir: outputs/egogazevqa_qwen_proactive_gaze_streaming
   dry_run: false
   save_prompts: true
   resume: false
@@ -10,25 +10,25 @@ data:
   dataset_dir: dataset/egogazevqa
   split: all
   task: qa
-  limit: 20
+  limit: 50
   seed: 42
-  manifest_path: outputs/egogazevqa_manifest.jsonl
+  manifest_path: null
   metadata_path: null
   narration_dir: null
   video_root: null
-  cache_dir: outputs/egogazevqa_qwen_proactive_baseline/_decoded_frames
+  cache_dir: outputs/egogazevqa_qwen_proactive_gaze_streaming/_decoded_frames
   skip_missing_images: true
   allow_sparse_window: true
   native_fps: 30
 
 prompt:
-  variant: proactive_baseline
+  variant: proactive_gaze_fast_streaming
   mode: proactive_window
   window_seconds: 5
   sample_fps: 1
-  max_frames: 6
+  max_frames: 5
   image_max_pixels: 200704
-  include_gaze_text: false
+  include_gaze_text: true
   max_gaze_points: 1
   include_object_inventory: false
   include_primary_function: false
@@ -40,23 +40,23 @@ prompt:
 api:
   api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
   api_key_env: QWEN_API_KEY
-  model: qwen3-vl-8b-thinking
+  model: qwen3-vl-flash
   temperature: 0.1
   max_tokens: 256
-  timeout_s: 90
-  sample_timeout_s: 120
+  timeout_s: 60
+  sample_timeout_s: 75
   stream: false
-  max_retries: 2
+  max_retries: 1
 
 evaluation:
   iou_thresholds: [0.3, 0.5]
-  export_visualizations: true
+  export_visualizations: false
   visualization_limit: 20
   proxy_box_size_ratio: 0.15
 
 judge:
   enable_intent_judge: true
-  model: qwen3-vl-8b-thinking
+  model: qwen3-vl-flash
   temperature: 0.0
   max_tokens: 160
 

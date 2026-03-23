@@ -20,6 +20,7 @@ from .config import AppConfig
 from .egogazevqa_data import (
     EgoGazeVQADataset,
     EgoGazeVQASample,
+    TemporalWindowAnalysis,
     VideoFrame,
     build_egogazevqa_manifest,
     decode_sampled_frames,
@@ -169,6 +170,39 @@ def _safe_mean(values: list[float]) -> float | None:
 
 def _safe_filename(value: str) -> str:
     return re.sub(r'[^a-zA-Z0-9._-]+', '_', value).strip('._') or "sample"
+
+
+def _format_float(value: float | None, digits: int = 4) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.{digits}f}"
+
+
+def _extract_window_analysis(row: dict[str, Any]) -> dict[str, Any] | None:
+    analysis = row.get("window_analysis")
+    if isinstance(analysis, dict) and analysis:
+        return analysis
+    prompt = row.get("prompt")
+    if isinstance(prompt, dict):
+        prompt_analysis = prompt.get("window_analysis")
+        if isinstance(prompt_analysis, dict) and prompt_analysis:
+            return prompt_analysis
+    return None
+
+
+def _parse_yes_no_label(text: str) -> bool | None:
+    normalized = text.strip().lower()
+    if not normalized:
+        return None
+    if "consistent" in normalized and "inconsistent" not in normalized:
+        return True
+    if "inconsistent" in normalized:
+        return False
+    if normalized.startswith("yes"):
+        return True
+    if normalized.startswith("no"):
+        return False
+    return None
 
 
 def _token_overlap_stats(predicted_tokens: set[str], reference_tokens: set[str]) -> tuple[int, float, float, float]:
@@ -325,25 +359,27 @@ def _remaining_timeout_s(deadline: float | None) -> float | None:
 
 
 def _row_intent_match(row: dict[str, Any]) -> bool:
+    if row.get("strict_intent_match") is not None:
+        return bool(row.get("strict_intent_match"))
+    if row.get("intent_match") is not None:
+        return bool(row.get("intent_match"))
     prediction = row.get("prediction")
     if isinstance(prediction, dict):
         predicted_intention = prediction.get("intention")
         reference_intention = row.get("reference_intention")
         if predicted_intention or reference_intention:
             return _intent_match(predicted_intention, reference_intention)
-    if row.get("strict_intent_match") is not None:
-        return bool(row.get("strict_intent_match"))
-    if row.get("intent_match") is not None:
-        return bool(row.get("intent_match"))
     return False
 
 
 def _row_intent_consistent(row: dict[str, Any]) -> bool:
+    if isinstance(row.get("intent_judge"), dict) and (row.get("intent_judge") or {}).get("enabled"):
+        return bool((row.get("intent_judge") or {}).get("consistent"))
+    if row.get("intent_consistent") is not None:
+        return bool(row.get("intent_consistent"))
     prediction = row.get("prediction")
     predicted_intention = prediction.get("intention") if isinstance(prediction, dict) else None
     if not predicted_intention:
-        if row.get("intent_consistent") is not None:
-            return bool(row.get("intent_consistent"))
         return False
 
     predicted_answer = row.get("predicted_answer")
@@ -353,8 +389,6 @@ def _row_intent_consistent(row: dict[str, Any]) -> bool:
 
     if row.get("reference_intention"):
         return _intent_match(predicted_intention, row.get("reference_intention"))
-    if row.get("intent_consistent") is not None:
-        return bool(row.get("intent_consistent"))
     return False
 
 
@@ -439,6 +473,7 @@ def _box_alignment_metrics(box: Box | None, gaze_anchor: dict[str, Any] | None) 
 
 def _row_proactive_metrics(row: dict[str, Any]) -> dict[str, Any]:
     gaze_anchor = _extract_row_gaze_anchor(row)
+    window_analysis = _extract_window_analysis(row) or {}
     effective_box = _effective_prediction_box(row)
     model_box = _model_prediction_box(row)
     refined_metrics = _box_alignment_metrics(effective_box, gaze_anchor)
@@ -447,6 +482,11 @@ def _row_proactive_metrics(row: dict[str, Any]) -> dict[str, Any]:
         "gaze_anchor_present": gaze_anchor is not None,
         "intent_consistent": _row_intent_consistent(row),
         "intent_match": _row_intent_match(row),
+        "intent_judge_consistent": (
+            bool(((row.get("intent_judge") or {}).get("consistent")))
+            if isinstance(row.get("intent_judge"), dict) and (row.get("intent_judge") or {}).get("enabled")
+            else None
+        ),
         "has_box": refined_metrics["has_box"],
         "proxy_iou": refined_metrics["proxy_iou"],
         "point_hit": refined_metrics["point_hit"],
@@ -456,6 +496,9 @@ def _row_proactive_metrics(row: dict[str, Any]) -> dict[str, Any]:
         "raw_point_hit": raw_metrics["point_hit"],
         "raw_center_distance_norm": raw_metrics["center_distance_norm"],
         "refinement_applied": bool((row.get("prediction") or {}).get("box_refinement")),
+        "low_dynamic": bool(window_analysis.get("low_dynamic")),
+        "lsfu_score": window_analysis.get("lsfu_score"),
+        "redundancy_ratio": window_analysis.get("redundancy_ratio"),
     }
     return metrics
 
@@ -536,6 +579,14 @@ def summarize_proactive(rows: list[dict[str, Any]], thresholds: list[float]) -> 
             for metric in proactive_metrics
             if metric.get("raw_center_distance_norm") is not None
         ]
+        lsfu_values = [
+            float(metric["lsfu_score"]) for metric in proactive_metrics if metric.get("lsfu_score") is not None
+        ]
+        redundancy_ratio_values = [
+            float(metric["redundancy_ratio"])
+            for metric in proactive_metrics
+            if metric.get("redundancy_ratio") is not None
+        ]
 
         summary: dict[str, Any] = {
             "count": total,
@@ -543,6 +594,9 @@ def summarize_proactive(rows: list[dict[str, Any]], thresholds: list[float]) -> 
             "intent_accuracy": sum(1 for metric in proactive_metrics if metric.get("intent_consistent")) / total,
             "intent_consistency": sum(1 for metric in proactive_metrics if metric.get("intent_consistent")) / total,
             "strict_intent_accuracy": sum(1 for metric in proactive_metrics if metric.get("intent_match")) / total,
+            "intent_judge_accuracy": sum(
+                1 for metric in proactive_metrics if metric.get("intent_judge_consistent") is True
+            ) / total,
             "completed_rate": len(completed_rows) / total,
             "parsed_answer_rate": sum(1 for row in group_rows if row.get("predicted_answer")) / total,
             "has_box_rate": sum(1 for metric in proactive_metrics if metric.get("has_box")) / total,
@@ -556,6 +610,12 @@ def summarize_proactive(rows: list[dict[str, Any]], thresholds: list[float]) -> 
             "mean_center_distance_norm": _safe_mean(center_distance_values),
             "raw_mean_center_distance_norm": _safe_mean(raw_center_distance_values),
             "refinement_applied_rate": sum(1 for metric in proactive_metrics if metric.get("refinement_applied")) / total,
+            "low_dynamic_rate": sum(1 for metric in proactive_metrics if metric.get("low_dynamic")) / total,
+            "mean_lsfu_score": _safe_mean(lsfu_values),
+            "mean_redundancy_ratio": _safe_mean(redundancy_ratio_values),
+            "pre_api_silence_rate": sum(
+                1 for row in group_rows if row.get("response", {}).get("finish_reason") == "pre_api_silence"
+            ) / total,
             "mean_latency_s": (
                 sum(float(row.get("response", {}).get("latency_s", 0.0)) for row in response_rows) / max(1, len(response_rows))
             ),
@@ -739,6 +799,66 @@ class EgoGazeVQARunner:
         assert last_exc is not None
         raise last_exc
 
+    def _judge_intention(
+        self,
+        sample: EgoGazeVQASample,
+        prediction: Prediction,
+        predicted_answer: str | None,
+    ) -> dict[str, Any] | None:
+        if not self.config.judge.enable_intent_judge:
+            return None
+        predicted_intention = (prediction.intention or "").strip()
+        reference_intention = sample.answer_option_map.get(sample.correct_answer)
+        if not predicted_intention or not reference_intention:
+            return {
+                "enabled": True,
+                "consistent": False,
+                "label": "INCONSISTENT",
+                "reason": "Missing predicted or reference intention.",
+                "model": self.config.judge.model or self.config.api.model,
+            }
+
+        system_prompt = (
+            "You are a strict evaluator for egocentric proactive reasoning. "
+            "Compare the predicted intention against the reference intention from the correct answer option. "
+            "Judge semantic consistency, not wording overlap. "
+            "Reply in exactly two lines:\n"
+            "Label: CONSISTENT or INCONSISTENT\n"
+            "Reason: <one short sentence>"
+        )
+        user_prompt = (
+            f"Question: {sample.question}\n\n"
+            f"Correct option letter: {sample.correct_answer}\n"
+            f"Correct option text: {reference_intention}\n\n"
+            f"Predicted answer letter: {predicted_answer or 'None'}\n"
+            f"Predicted intention: {predicted_intention}\n\n"
+            "Judge whether the predicted intention is semantically consistent with the correct option text."
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        result = self._ensure_client().complete(
+            messages,
+            model_override=self.config.judge.model or self.config.api.model,
+            temperature_override=self.config.judge.temperature,
+            max_tokens_override=self.config.judge.max_tokens,
+        )
+        label = _extract_field(result.text, ["Label"]) or result.text.splitlines()[0].strip()
+        reason = _extract_field(result.text, ["Reason"])
+        consistent = _parse_yes_no_label(label)
+        if consistent is None:
+            consistent = _parse_yes_no_label(result.text)
+        return {
+            "enabled": True,
+            "consistent": bool(consistent),
+            "label": label,
+            "reason": reason,
+            "model": result.model,
+            "response_text": result.text,
+            "reasoning_text": result.reasoning_text,
+        }
+
     def _manifest_entries(self) -> list[dict[str, str]] | None:
         manifest_path = self.config.data.manifest_path
         if manifest_path is None or not manifest_path.exists():
@@ -770,11 +890,101 @@ class EgoGazeVQARunner:
         write_jsonl(output_path, manifest)
         return manifest
 
+    def _decode_window(
+        self,
+        sample: EgoGazeVQASample,
+        frame_cache_dir: Path,
+    ) -> tuple[list[VideoFrame], TemporalWindowAnalysis]:
+        return decode_sampled_frames(
+            sample,
+            max_frames=self.config.prompt.max_frames,
+            cache_dir=frame_cache_dir,
+            window_seconds=self.config.prompt.window_seconds if self._is_proactive_mode() else None,
+            source_fps=self.config.data.native_fps,
+            sample_fps=self.config.prompt.sample_fps,
+            tail_only=self._is_proactive_mode(),
+            redundancy_config=self.config.redundancy,
+        )
+
+    def _should_short_circuit_silence(self, analysis: TemporalWindowAnalysis | None) -> tuple[bool, str | None]:
+        if not self._is_proactive_mode() or not self.config.prompt.allow_silence:
+            return False, None
+        if not self.config.redundancy.pre_api_silence_on_low_dynamic:
+            return False, None
+        if analysis is None or not analysis.low_dynamic:
+            return False, None
+        if self.config.redundancy.enable_lsfu:
+            if analysis.lsfu_score is None or analysis.lsfu_score < self.config.redundancy.lsfu_threshold:
+                return False, None
+        reason = analysis.low_dynamic_reason or "low_dynamic_window"
+        if self.config.redundancy.enable_lsfu and analysis.lsfu_score is not None:
+            reason = f"{reason};lsfu={analysis.lsfu_score:.3f}"
+        return True, reason
+
     def inspect(self) -> dict[str, Any]:
         stats = self.dataset.inspect(self.config.data.split)
         stats["dataset_dir"] = str(self.config.data.dataset_dir)
         stats["metadata_path"] = str(self.dataset.resolve_metadata_path())
         stats["task_mode"] = "proactive" if self._is_proactive_mode() else "qa"
+        if self._is_proactive_mode():
+            probe_examples = self.load_examples()[: max(0, int(self.config.redundancy.inspect_probe_limit))]
+            if probe_examples:
+                frame_cache_dir = ensure_dir(self.config.data.cache_dir or (self.config.experiment.output_dir / "_decoded_frames"))
+                analyses: list[TemporalWindowAnalysis] = []
+                low_dynamic_examples: list[str] = []
+                failures = 0
+                for example in probe_examples:
+                    try:
+                        _, analysis = self._decode_window(example, frame_cache_dir)
+                    except Exception:
+                        failures += 1
+                        continue
+                    analyses.append(analysis)
+                    if analysis.low_dynamic and len(low_dynamic_examples) < 10:
+                        low_dynamic_examples.append(example.sample_id)
+                stats["temporal_redundancy_probe"] = {
+                    "probe_count": len(probe_examples),
+                    "analyzed_count": len(analyses),
+                    "failure_count": failures,
+                    "low_dynamic_count": sum(1 for analysis in analyses if analysis.low_dynamic),
+                    "low_dynamic_rate": (
+                        sum(1 for analysis in analyses if analysis.low_dynamic) / max(1, len(analyses))
+                    ),
+                    "mean_original_frame_count": _safe_mean(
+                        [float(analysis.original_frame_count) for analysis in analyses]
+                    ),
+                    "mean_kept_frame_count": _safe_mean(
+                        [float(analysis.kept_frame_count) for analysis in analyses]
+                    ),
+                    "mean_redundancy_ratio": _safe_mean(
+                        [float(analysis.redundancy_ratio) for analysis in analyses]
+                    ),
+                    "mean_optical_flow": _safe_mean(
+                        [
+                            float(analysis.mean_optical_flow)
+                            for analysis in analyses
+                            if analysis.mean_optical_flow is not None
+                        ]
+                    ),
+                    "mean_hsv_hist_similarity": _safe_mean(
+                        [
+                            float(analysis.mean_hsv_hist_similarity)
+                            for analysis in analyses
+                            if analysis.mean_hsv_hist_similarity is not None
+                        ]
+                    ),
+                    "mean_gaze_shift_norm": _safe_mean(
+                        [
+                            float(analysis.mean_gaze_shift_norm)
+                            for analysis in analyses
+                            if analysis.mean_gaze_shift_norm is not None
+                        ]
+                    ),
+                    "mean_lsfu_score": _safe_mean(
+                        [float(analysis.lsfu_score) for analysis in analyses if analysis.lsfu_score is not None]
+                    ),
+                    "sample_low_dynamic_ids": low_dynamic_examples,
+                }
         return stats
 
     def evaluate_existing(self) -> dict[str, Any]:
@@ -847,9 +1057,12 @@ class EgoGazeVQARunner:
                 ]
                 if not self.config.prompt.allow_silence:
                     lines.append("Do not output <SILENCE>. Always choose the best option and include a box.")
-                elif include_gaze:
+                else:
                     lines.append(
-                        f"If no actionable intent is detectable, output only the exact token {self.config.prompt.silence_token}."
+                        (
+                            f"If the recent window shows no meaningful state change, no new immediate need, "
+                            f"or only visually redundant evidence, output only the exact token {self.config.prompt.silence_token}."
+                        )
                     )
                 return "\n".join(lines)
 
@@ -868,7 +1081,7 @@ class EgoGazeVQARunner:
             lines.extend(
                 [
                     (
-                        f"If no actionable intent is detectable, output only the exact token "
+                        f"If no actionable intent is detectable, or the recent window is visually redundant without a meaningful state change, output only the exact token "
                         f"{self.config.prompt.silence_token}."
                         if self.config.prompt.allow_silence
                         else "Always choose the single best answer option from the candidates."
@@ -979,6 +1192,7 @@ class EgoGazeVQARunner:
         sample: EgoGazeVQASample,
         frames: list[VideoFrame],
         gaze_anchor: GazeAnchor | None,
+        window_analysis: TemporalWindowAnalysis | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         include_gaze = self.config.prompt.include_gaze_text
         system_prompt = self._build_system_prompt(include_gaze=include_gaze)
@@ -994,6 +1208,7 @@ class EgoGazeVQARunner:
                 "Do not return 0-1 normalized box coordinates.",
                 "The localization must be a tight box around one visible target object.",
                 "Prefer the object being attended right now, not a loose area around it.",
+                "Treat the frames as a temporal stream. Identical-looking frames can still mean time has passed without a state change.",
             ]
         else:
             user_sections = [
@@ -1010,7 +1225,25 @@ class EgoGazeVQARunner:
                 f"The latest frame size is {latest_width}x{latest_height}. Output absolute pixel coordinates for this frame only.",
                 "Do not return 0-1 normalized box coordinates.",
                 "Return one tight box around the specific visible target object, not around a broad region.",
+                "Treat visually similar frames as temporal evidence, not as duplicates to average away.",
             ]
+        if window_analysis is not None:
+            user_sections.append(
+                (
+                    "Window dynamics summary: "
+                    f"original_frames={window_analysis.original_frame_count}, "
+                    f"kept_frames={window_analysis.kept_frame_count}, "
+                    f"mean_flow={_format_float(window_analysis.mean_optical_flow, 3)}, "
+                    f"mean_hist_similarity={_format_float(window_analysis.mean_hsv_hist_similarity, 4)}, "
+                    f"mean_gaze_shift={_format_float(window_analysis.mean_gaze_shift_norm, 4)}, "
+                    f"low_dynamic={window_analysis.low_dynamic}."
+                )
+            )
+            if window_analysis.low_dynamic and self.config.prompt.allow_silence:
+                user_sections.append(
+                    "The front-end marked this window as low-dynamic. If there is no meaningful new intent, return only "
+                    f"{self.config.prompt.silence_token}."
+                )
         if include_gaze:
             if gaze_anchor is None:
                 user_sections.append("Current gaze coordinates are unavailable for this clip.")
@@ -1032,7 +1265,10 @@ class EgoGazeVQARunner:
                 )
         if self.config.prompt.allow_silence:
             user_sections.append(
-                f"If no actionable intent can be inferred, return only {self.config.prompt.silence_token}."
+                (
+                    f"If no actionable intent can be inferred, or the recent sequence shows no meaningful state change "
+                    f"relative to the current window, return only {self.config.prompt.silence_token}."
+                )
             )
         else:
             user_sections.append(
@@ -1041,9 +1277,19 @@ class EgoGazeVQARunner:
         user_prompt = "\n\n".join(user_sections)
 
         content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        latest_clip_index = frames[-1].clip_index if frames else 0
         for index, frame in enumerate(frames, start=1):
             label = "Current frame" if index == len(frames) else f"Past frame {index}"
-            content.append({"type": "text", "text": f"{label} (source_frame={frame.source_frame})"})
+            rel_seconds = (frame.clip_index - latest_clip_index) / max(float(self.config.data.native_fps), 1.0)
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"{label} (source_frame={frame.source_frame}, "
+                        f"relative_time={rel_seconds:+.2f}s)"
+                    ),
+                }
+            )
             content.append({"type": "image_url", "image_url": {"url": _image_to_data_url(frame.path, self.config.prompt.image_max_pixels)}})
 
         messages = [
@@ -1057,6 +1303,8 @@ class EgoGazeVQARunner:
         }
         if gaze_anchor is not None:
             prompt_record["gaze_anchor"] = gaze_anchor.to_dict()
+        if window_analysis is not None:
+            prompt_record["window_analysis"] = window_analysis.to_dict()
         return messages, prompt_record
 
     def _build_messages(
@@ -1064,9 +1312,10 @@ class EgoGazeVQARunner:
         sample: EgoGazeVQASample,
         frames: list[VideoFrame],
         gaze_anchor: GazeAnchor | None,
+        window_analysis: TemporalWindowAnalysis | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if self._is_proactive_mode():
-            return self._build_proactive_messages(sample, frames, gaze_anchor)
+            return self._build_proactive_messages(sample, frames, gaze_anchor, window_analysis)
         return self._build_qa_messages(sample, frames)
 
     def _evaluate_proactive_prediction(
@@ -1092,6 +1341,27 @@ class EgoGazeVQARunner:
         refined_alignment = _box_alignment_metrics(clipped_box, gaze_anchor.to_dict() if gaze_anchor else None)
         reference_intention = sample.answer_option_map.get(sample.correct_answer)
         intent_similarity = _intent_similarity(prediction.intention, reference_intention)
+        heuristic_intent_match = _intent_match(prediction.intention, reference_intention)
+        heuristic_intent_consistent = bool(prediction.intention) and (
+            predicted_answer == sample.correct_answer or heuristic_intent_match
+        )
+        intent_judge = None
+        if not prediction.is_silence:
+            try:
+                intent_judge = self._judge_intention(sample, prediction, predicted_answer)
+            except Exception as exc:
+                intent_judge = {
+                    "enabled": True,
+                    "consistent": heuristic_intent_consistent,
+                    "label": "JUDGE_ERROR",
+                    "reason": str(exc),
+                    "model": self.config.judge.model or self.config.api.model,
+                }
+        judge_consistent = (
+            bool(intent_judge.get("consistent"))
+            if isinstance(intent_judge, dict) and intent_judge.get("enabled")
+            else heuristic_intent_consistent
+        )
 
         result: dict[str, Any] = {
             "prediction": prediction_payload,
@@ -1099,11 +1369,11 @@ class EgoGazeVQARunner:
             "reference_answer": sample.correct_answer,
             "reference_intention": reference_intention,
             "correct": predicted_answer == sample.correct_answer,
-            "intent_consistent": bool(prediction.intention) and (
-                predicted_answer == sample.correct_answer or _intent_match(prediction.intention, reference_intention)
-            ),
-            "strict_intent_match": _intent_match(prediction.intention, reference_intention),
-            "intent_match": _intent_match(prediction.intention, reference_intention),
+            "intent_consistent": judge_consistent,
+            "strict_intent_match": heuristic_intent_match,
+            "intent_match": heuristic_intent_match,
+            "intent_consistent_heuristic": heuristic_intent_consistent,
+            "intent_judge": intent_judge,
             "intent_similarity": intent_similarity,
             "is_silence": prediction.is_silence,
             "has_box": refined_alignment["has_box"],
@@ -1200,16 +1470,9 @@ class EgoGazeVQARunner:
         }
 
         try:
-            frames = decode_sampled_frames(
-                sample,
-                max_frames=self.config.prompt.max_frames,
-                cache_dir=frame_cache_dir,
-                window_seconds=self.config.prompt.window_seconds if self._is_proactive_mode() else None,
-                source_fps=self.config.data.native_fps,
-                sample_fps=self.config.prompt.sample_fps,
-                tail_only=self._is_proactive_mode(),
-            )
+            frames, window_analysis = self._decode_window(sample, frame_cache_dir)
             row["frames"] = [str(frame.path) for frame in frames]
+            row["window_analysis"] = window_analysis.to_dict()
         except Exception as exc:
             row["status"] = "error"
             row["error"] = str(exc)
@@ -1219,8 +1482,13 @@ class EgoGazeVQARunner:
             row["status"] = "skipped_missing_videos"
             return row
 
+        if self.config.redundancy.skip_low_dynamic_samples and window_analysis.low_dynamic:
+            row["status"] = "skipped_low_dynamic"
+            row["skip_reason"] = window_analysis.low_dynamic_reason or "low_dynamic_window"
+            return row
+
         gaze_anchor = self._resolve_gaze_anchor(sample, frames) if self._is_proactive_mode() else None
-        messages, prompt_record = self._build_messages(sample, frames, gaze_anchor)
+        messages, prompt_record = self._build_messages(sample, frames, gaze_anchor, window_analysis)
         if self.config.experiment.save_prompts:
             row["prompt"] = prompt_record
 
@@ -1229,6 +1497,39 @@ class EgoGazeVQARunner:
                 row["status"] = "dry_run"
                 if gaze_anchor is not None:
                     row["gaze_anchor"] = gaze_anchor.to_dict()
+                return row
+
+            short_circuit_silence, silence_reason = self._should_short_circuit_silence(window_analysis)
+            if short_circuit_silence:
+                prediction = parse_prediction(
+                    self.config.prompt.silence_token,
+                    silence_token=self.config.prompt.silence_token,
+                    box_format=self.config.prompt.prediction_box_format,
+                )
+                row["status"] = "completed"
+                row["silence_reason"] = silence_reason
+                row["response"] = {
+                    "text": self.config.prompt.silence_token,
+                    "reasoning_text": None,
+                    "latency_s": 0.0,
+                    "backend_latency_s": 0.0,
+                    "usage": None,
+                    "finish_reason": "pre_api_silence",
+                    "model": "rule_based_silence",
+                    "attempt_count": 0,
+                    "recovery_attempts": [],
+                    "pipeline_failures": [],
+                    "empty_text_recovered": False,
+                }
+                row.update(
+                    self._evaluate_proactive_prediction(
+                        sample=sample,
+                        frames=frames,
+                        prediction=prediction,
+                        predicted_answer=None,
+                        gaze_anchor=gaze_anchor,
+                    )
+                )
                 return row
 
             result, completion_attempts, total_latency_s, pipeline_failures = self._complete_with_pipeline_retries(messages)
@@ -1261,6 +1562,7 @@ class EgoGazeVQARunner:
 
             row["response"] = {
                 "text": result.text,
+                "reasoning_text": result.reasoning_text,
                 "latency_s": total_latency_s,
                 "backend_latency_s": result.latency_s,
                 "usage": result.usage,

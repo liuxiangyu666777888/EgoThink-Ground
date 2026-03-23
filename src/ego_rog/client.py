@@ -27,11 +27,23 @@ def _extract_content(content: str | list[dict] | None) -> str:
 @dataclass
 class ChatResult:
     text: str
+    reasoning_text: str | None
     raw: dict
     latency_s: float
     usage: dict | None
     finish_reason: str | None
     model: str
+
+
+def _extract_reasoning(message: dict | None) -> str | None:
+    if not isinstance(message, dict):
+        return None
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        text = _extract_content(value)
+        if text:
+            return text
+    return None
 
 
 class QwenChatClient:
@@ -52,12 +64,18 @@ class QwenChatClient:
             "Authorization": f"Bearer {self.config.resolved_api_key()}",
         }
 
-    def _payload(self, messages: list[dict], model: str | None = None) -> dict:
+    def _payload(
+        self,
+        messages: list[dict],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
         return {
             "model": model or self.config.model,
             "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
             "stream": self.config.stream,
         }
 
@@ -97,9 +115,16 @@ class QwenChatClient:
         messages: list[dict],
         model_override: str | None = None,
         timeout_override: float | None = None,
+        temperature_override: float | None = None,
+        max_tokens_override: int | None = None,
     ) -> ChatResult:
         model_name = model_override or self.config.model
-        payload = self._payload(messages, model=model_name)
+        payload = self._payload(
+            messages,
+            model=model_name,
+            temperature=temperature_override,
+            max_tokens=max_tokens_override,
+        )
         start = time.perf_counter()
         if self.config.stream:
             response = self._post_with_retries(payload, stream=True, timeout_override=timeout_override)
@@ -107,6 +132,7 @@ class QwenChatClient:
             latency = time.perf_counter() - start
             return ChatResult(
                 text=text,
+                reasoning_text=None,
                 raw={"stream": True},
                 latency_s=latency,
                 usage=None,
@@ -122,6 +148,7 @@ class QwenChatClient:
         text = _extract_content(message.get("content"))
         return ChatResult(
             text=text,
+            reasoning_text=_extract_reasoning(message),
             raw=body,
             latency_s=latency,
             usage=body.get("usage"),
