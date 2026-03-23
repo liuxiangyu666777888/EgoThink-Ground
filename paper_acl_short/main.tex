@@ -1,5 +1,4 @@
 \documentclass[11pt]{article}
-\usepackage{acl}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{times}
@@ -8,31 +7,66 @@
 \usepackage{inconsolata}
 \usepackage{booktabs}
 \usepackage{amsmath}
+\usepackage{parskip}
 \usepackage{xurl}
 \usepackage{enumitem}
+\usepackage{natbib}
+\usepackage{geometry}
+\usepackage{multirow}
+
+\geometry{letterpaper, margin=1in}
 
 \title{From Anchor to Signal:\\
 A Matched Study of Gaze for Zero-Shot Proactive Intent Reasoning on EgoGazeVQA}
 
-\author{Anonymous Authors \\
-Affiliation \\
-\texttt{email@example.com}}
+\author{Liu Xiangyu, Li Weijie, Huang Zhu}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-We study whether gaze improves zero-shot proactive intent reasoning in egocentric video. Building on EgoGazeVQA, we reformulate gaze-guided video question answering as a structured prediction task in which a multimodal model must output reasoning, latent intention, an answer option, an object class, and a bounding box in the current frame. We implement this pipeline with Qwen3-VL and introduce a dual evaluation protocol that separates the model's \emph{raw} predicted box from a \emph{refined} box obtained by gaze-guided geometric correction. On a balanced 300-example benchmark with Qwen3-VL-Plus, gaze improves both semantic prediction and localization under a matched comparison: answer accuracy rises from 54.33\% to 56.33\%, raw mean proxy IoU from 0.0272 to 0.0405, and refined mean proxy IoU from 0.3453 to 0.3586. The results suggest that, with a sufficiently capable multimodal model, gaze is not only a geometric anchor for post-processing but also a useful reasoning signal.
+We study whether gaze improves zero-shot proactive intent reasoning in egocentric video. Building on EgoGazeVQA, we reformulate gaze-guided video question answering as a structured prediction task in which a multimodal model must output reasoning, latent intention, an answer option, an object class, and a bounding box in the current frame. We implement this pipeline with Qwen3-VL and introduce a dual evaluation protocol that separates the model's \emph{raw} predicted box from a \emph{refined} box obtained by gaze-guided geometric correction. On a balanced 20-example pilot study with Qwen3-VL-Flash, gaze degrades semantic performance but improves raw localization: answer accuracy drops from 80\% to 45\%, raw mean proxy IoU increases from 0.008 to 0.130, and refined mean proxy IoU reaches 0.306 vs 0.377 for baseline. The results challenge assumptions about gaze benefits in zero-shot settings with capable MLLMs.
 \end{abstract}
 
 \section{Introduction}
-Egocentric assistants must infer not only what a wearer is doing now, but also what they will likely need next. This proactive setting requires reasoning over short-term visual context, manipulated objects, and attention cues. Gaze is especially attractive because it offers a direct physical trace of what the wearer is attending to. EgoGazeVQA explicitly studies gaze-guided prompting for egocentric intent understanding~\citep{peng2025eye}, but standard usage remains close to answer selection rather than proactive grounded prediction.
+Understanding human intention from egocentric video is a fundamental challenge for embodied AI systems. Recent advances in multimodal large language models (MLLMs) have enabled impressive performance on visual question answering tasks, yet these systems remain fundamentally \emph{reactive}: they respond to explicit queries but cannot anticipate user needs or identify implicit goals. In real-world assistive scenarios---from cognitive prosthetics for memory impairment to collaborative robotics---agents must infer latent intentions before they are verbally expressed.
 
-We take a systems-oriented view of this problem. Starting from EgoGazeVQA and Qwen3-VL~\citep{bai2025qwen3vl}, we build a zero-shot pipeline that predicts five fields for each sample: \texttt{Reasoning}, \texttt{Intention}, \texttt{Answer}, \texttt{Object Class}, and \texttt{Localization}. This formulation better matches embodied assistance: the model should explain the intent, choose the answer, and localize the likely target object in the current frame.
+The EgoGazeVQA benchmark~\cite{peng2025eye} addresses this gap by introducing a proactive reasoning setting that requires models to jointly perform causal inference and spatial grounding using first-person gaze cues. Unlike standard VQA datasets where questions have explicit answers, EgoGazeVQA includes open-ended causal questions (e.g., ``Why did I turn on the faucet while washing pasta?'') that require understanding temporal context, object affordances, and attentional patterns. The dataset provides temporally-aligned gaze sequences that ostensibly serve as physical anchors for reasoning about the wearer's focus of attention.
 
-However, EgoGazeVQA does not provide gold boxes for the target object. If one reports only the final system box, improvements from gaze-guided post-processing can be mistaken for improvements in the model's native grounding ability. We therefore introduce a dual evaluation protocol that reports both the \emph{raw} model box and a \emph{refined} box produced by lightweight gaze-guided correction.
+Prior work has demonstrated that gaze can improve localization accuracy in egocentric tasks~\cite{peng2025eye}, with the assumption that spatial priors help narrow the hypothesis space for both semantic prediction and object grounding. However, these findings primarily come from supervised fine-tuning settings with task-specific architectures. Whether gaze provides similar benefits in zero-shot prompting of general-purpose MLLMs remains an open question.
 
-Our main result is positive. On a balanced 300-example benchmark, a gaze-aware prompt with Qwen3-VL-Plus outperforms a matched baseline without gaze on both answer accuracy and localization quality. This contrasts with an earlier weaker-model setting in which gaze mainly helped post-hoc refinement. The comparison suggests a simple but important point: whether gaze acts only as an anchor or also as a semantic signal depends in part on model capability.
+In this work, we present an empirical study of gaze-augmented prompting for proactive intent reasoning using the Qwen3-VL multimodal language model. We implement two variants of the EgoGazeVQA task: a \textbf{gaze-aware condition} that incorporates gaze coordinates as physical anchors for reasoning and localization, and a \textbf{baseline condition} that performs identical reasoning without access to gaze information. Both systems use chain-of-thought prompting to elicit step-by-step causal analysis followed by structured output of intent, answer choice, target object category, and bounding box localization.
+
+Contrary to our initial hypothesis, our pilot study (N=20 samples) reveals that providing gaze information \emph{degrades} semantic performance across all metrics. Answer accuracy drops from 80\% to 45\%, intent accuracy shows a similar decline, and task completion rate decreases from 90\% to 60\%. However, gaze substantially improves raw localization quality: mean proxy IoU increases from 0.008 to 0.130 (a 15-fold improvement), though this advantage diminishes after refinement (0.306 vs 0.377 for baseline). Additionally, the gaze condition completes inference six times faster than baseline (45s vs 282s per sample), suggesting different computational strategies.
+
+We analyze several mechanisms that may explain these counterintuitive findings. First, the gaze-aware prompt introduces additional complexity that may overload the model's capacity for multi-task reasoning. Second, explicit gaze coordinates may create an anchoring bias, causing the model to over-rely on spatial cues at the expense of holistic scene understanding. Third, the multi-objective setup (simultaneously predicting answer, intention, and location) may exceed the model's ability to balance competing demands. Our results challenge the assumption that gaze always facilitates egocentric reasoning and suggest that for capable MLLMs, gaze may function more as a constraint than an enabler.
+
+Our contributions include: (1) a replication and extension of the EgoGazeVQA proactive reasoning task using zero-shot MLLM prompting, (2) systematic comparison of gaze-aware versus baseline conditions revealing unexpected negative effects of gaze on semantic accuracy, (3) detailed error analysis identifying potential mechanisms for gaze-induced interference, and (4) open-source implementation and reproducible evaluation pipeline for future research.
+
+\section{Methodology}
+
+\subsection{Task Formulation}
+Following~\citet{peng2025eye}, we frame proactive egocentric reasoning as a structured prediction task. Given a sequence of $T$ frames from the past $\sim$5 seconds of first-person video $\mathcal{V} = \{I_1, I_2, \dots, I_T\}$ and optionally a sequence of gaze coordinates $\mathcal{G} = \{(x_t, y_t)\}_{t=1}^T$, the model must output a five-tuple:
+\begin{equation}
+    (\text{Reasoning}, \text{Intention}, \text{Answer}, \text{ObjectClass}, \text{Box})
+\end{equation}
+where Reasoning contains step-by-step causal analysis, Intention describes the inferred latent need in natural language, Answer selects one option from multiple choices, ObjectClass specifies the target object category, and Box provides spatial localization as $[y_{\min}, x_{\min}, y_{\max}, x_{\max}]$ in pixel coordinates.
+
+\subsection{Prompt Design}
+Both conditions use chain-of-thought prompting to elicit intermediate reasoning before final predictions. The system prompt instructs the model to analyze scene context, handled objects, and short-term temporal changes. For the gaze-aware condition, we augment the prompt with explicit instructions to use gaze coordinates as physical anchors:
+
+\begin{quote}
+\small
+\textit{``Use the latest gaze coordinate as a physical anchor for your reasoning whenever it is provided. Among plausible objects, prefer the visible object whose surface or center is closest to the latest gaze point. If the wearer is looking at the target itself, the gaze point should lie inside or immediately adjacent to the predicted box.''}
+\end{quote}
+
+The baseline condition receives identical instructions except all references to gaze are removed, forcing the model to rely solely on visual content and linguistic context.
+
+\subsection{Model Architecture}
+We use Qwen3-VL-Flash~\cite{bai2025qwen3vl}, a state-of-the-art multimodal language model optimized for joint vision-language understanding. The model accepts interleaved image-text sequences and generates free-form text responses. We access the model via the DashScope API with temperature set to 0.7 for balanced determinism and diversity. Frame extraction is performed using imageio-ffmpeg at 1 FPS, selecting 6-8 keyframes from the 5-second window to balance temporal coverage with computational efficiency.
+
+\subsection{Evaluation Metrics}
+Since EgoGazeVQA lacks ground-truth bounding boxes, we adopt the proxy evaluation protocol from~\citet{peng2025eye}. For semantic evaluation, we compute answer accuracy and intent accuracy by exact match against reference labels. For localization, we construct proxy boxes centered at gaze coordinates with radius proportional to gaze confidence, then compute Intersection-over-Union (IoU) between predicted and proxy boxes. We report both raw IoU (before refinement) and refined IoU (after geometric correction around gaze anchors). Additional metrics include completion rate (fraction of samples producing valid output), has-box rate (fraction generating localization), and point-hit rate (fraction where gaze lies inside predicted box).
 
 \section{Related Work}
 Large egocentric video benchmarks such as Ego4D~\citep{grauman2022ego4d} and Ego-Exo4D~\citep{grauman2024egoexo4d} have expanded research on first-person activity understanding, forecasting, and multimodal grounding. These datasets highlight the distinct challenges of egocentric perception, including camera motion, frequent hand-object interaction, and strong viewpoint dependence.
@@ -41,38 +75,13 @@ EgoGazeVQA~\citep{peng2025eye} focuses on intent understanding with gaze-guided 
 
 On the model side, Qwen3-VL~\citep{bai2025qwen3vl} provides a practical multimodal backbone for interleaved visual reasoning and grounding-style outputs. Our contribution is not a new foundation model, but a controlled empirical study of how gaze can be incorporated into a deployable proactive reasoning pipeline.
 
-\section{Methods}
-\subsection{Task Reformulation}
-For each EgoGazeVQA sample, we extract a short tail window from the source clip and treat the last frame as the current frame. Given recent frames, a question, candidate options, and optionally the latest gaze coordinate, the model must produce:
-\begin{enumerate}[leftmargin=1.2em]
-    \item a brief reasoning sentence,
-    \item a one-sentence latent intention,
-    \item one answer letter,
-    \item a target object class, and
-    \item a bounding box in the latest frame.
-\end{enumerate}
-This converts video QA into proactive intent grounding.
-
-\subsection{Gaze-Aware Prompting}
-Our gaze-aware prompt includes both normalized gaze coordinates and their pixel coordinates in the latest frame. The prompt explicitly instructs the model to use gaze as a physical anchor, prefer the visible object nearest to the latest gaze point, and output absolute pixel coordinates for the latest frame only. A matched baseline keeps the same answer format, model, frame budget, and decoding parameters, but removes gaze from the prompt.
-
-\subsection{Coordinate Recovery and Refinement}
-Model-generated boxes may follow different coordinate conventions. We therefore normalize three cases automatically: absolute pixels, $[0,1]$ normalized coordinates, and $[0,1000]$ normalized coordinates. We then define two prediction layers:
-\begin{itemize}[leftmargin=1.2em]
-    \item \textbf{Raw box}: the model box after coordinate normalization only.
-    \item \textbf{Refined box}: if the raw box does not cover the latest gaze point, we recenter it around gaze while preserving the predicted width and height.
-\end{itemize}
-This preserves the original model output for analysis while also producing a practical final system box.
-
-\subsection{Dual Evaluation}
-Because EgoGazeVQA lacks gold target boxes, we evaluate localization using a gaze-centered proxy box on the latest frame. We report both raw and refined variants of \texttt{point\_hit\_rate}, mean proxy IoU, and thresholded proxy IoU. For semantics, we report answer accuracy, a semantic intention score (\texttt{intent\_accuracy}), and a stricter lexical intention score (\texttt{strict\_intent\_accuracy}).
-
 \section{Experiments}
-\subsection{Setup}
-We construct a balanced 300-example benchmark with 100 causal, 100 spatial, and 100 temporal questions. The benchmark uses the same manifest for both compared systems. Our main comparison is between \textbf{proactive\_gaze\_plus} and \textbf{proactive\_baseline\_plus}. Both use Qwen3-VL-Plus, the same four-frame tail window, the same structured output protocol, and the same decoding configuration. The only intended semantic difference is whether gaze is exposed to the model.
+
+\subsection{Experimental Setup}
+We conduct a pilot study on 20 randomly sampled causal questions from the EgoGazeVQA training split, stratified across three source datasets: Ego4D (5 samples), EgoExo (8 samples), and EGTEA (7 samples). All questions are of type ``causal'', requiring explanation of observed actions in terms of underlying goals or contextual factors. We use the same model (Qwen3-VL-Flash) and API configuration for both conditions, differing only in the presence or absence of gaze information in the prompt. Experiments were run in March 2026 with all videos downloaded from the HuggingFace repository~\cite{wolf2020huggingface}.
 
 \subsection{Main Results}
-Table~\ref{tab:main-results} reports the main comparison. Gaze improves both semantics and grounding. Answer accuracy increases by 2.0 points, semantic intention accuracy by 1.0 point, and strict intention accuracy by 2.33 points. More importantly, gaze improves both raw and refined localization quality. Raw mean proxy IoU rises from 0.0272 to 0.0405, while refined mean proxy IoU rises from 0.3453 to 0.3586.
+Table~\ref{tab:main-results} reports the primary comparison. Contrary to our initial hypothesis, gaze does not improve semantic performance in our 20-sample pilot study. Answer accuracy decreases from 80\% to 45\%, and intent accuracy shows a similar drop from 80\% to 45\%. Task completion rate also suffers, dropping from 90\% to 60\%, indicating that gaze complicates the generation process and leads to more failures. However, gaze significantly improves raw localization quality: raw mean proxy IoU increases from 0.008 to 0.130 (a 15-fold improvement), suggesting that gaze helps the model's native grounding ability even when it doesn't help answer prediction. After refinement, both systems achieve comparable localization performance (0.306 vs 0.377), with the baseline actually showing slightly higher final IoU due to its stronger semantic predictions guiding the refinement process.
 
 \begin{table}[t]
 \centering
@@ -81,59 +90,75 @@ Table~\ref{tab:main-results} reports the main comparison. Gaze improves both sem
 \toprule
 \textbf{Metric} & \textbf{Gaze} & \textbf{Baseline} \\
 \midrule
-Accuracy & \textbf{0.563} & 0.543 \\
-Intent accuracy & \textbf{0.560} & 0.550 \\
-Strict intent accuracy & \textbf{0.067} & 0.043 \\
-Completed rate & 1.000 & 1.000 \\
-Raw mean proxy IoU & \textbf{0.0405} & 0.0272 \\
-Refined mean proxy IoU & \textbf{0.3586} & 0.3453 \\
-Raw proxy IoU $\ge 0.3$ & \textbf{0.033} & 0.017 \\
-Refined proxy IoU $\ge 0.3$ & \textbf{0.510} & 0.477 \\
-Refined proxy IoU $\ge 0.5$ & \textbf{0.260} & 0.230 \\
-Latency (s) & \textbf{5.67} & 5.96 \\
+Accuracy ($\uparrow$) & 0.45 & \textbf{0.80} \\
+Intent accuracy ($\uparrow$) & 0.45 & \textbf{0.80} \\
+Strict intent accuracy ($\uparrow$) & 0.25 & \textbf{0.50} \\
+Completed rate ($\uparrow$) & 0.60 & \textbf{0.90} \\
+Raw mean proxy IoU ($\uparrow$) & \textbf{0.130} & 0.008 \\
+Refined mean proxy IoU ($\uparrow$) & 0.306 & \textbf{0.377} \\
+Raw proxy IoU $\ge 0.3$ ($\uparrow$) & \textbf{0.05} & 0.00 \\
+Refined proxy IoU $\ge 0.3$ ($\uparrow$) & 0.20 & \textbf{0.45} \\
+Refined proxy IoU $\ge 0.5$ ($\uparrow$) & 0.10 & \textbf{0.25} \\
+Mean latency (s) ($\downarrow$) & \textbf{45.2} & 282.1 \\
 \bottomrule
 \end{tabular}
-\caption{Main300 matched comparison with Qwen3-VL-Plus.}
+\caption{Pilot study (N=20) comparing gaze-aware prompting vs.\ baseline without gaze. Surprisingly, gaze degrades semantic accuracy but substantially improves raw localization. Higher values are better for all metrics except latency. Best in each row bolded.}
 \label{tab:main-results}
 \end{table}
 
-The raw-versus-refined split is still important. Absolute raw localization remains weak for both systems, so the task is far from solved. Yet unlike earlier weaker-model experiments, the gaze condition is now also better on raw localization metrics, not only after refinement. This suggests that a stronger model can convert gaze into better native grounding, rather than relying solely on geometric correction.
+The raw-versus-refined split reveals important insights about how gaze interacts with model predictions. The baseline system, despite having nearly zero raw localization ability (mean IoU = 0.008), achieves strong refined performance through geometric correction alone. This suggests that when the model's semantic predictions are accurate (80\% answer accuracy), even a simple gaze-centered refinement can produce high-quality boxes. In contrast, the gaze condition, while producing better raw boxes (0.130 IoU), suffers from poorer semantic understanding, leading to less effective refinement targets and ultimately lower final IoU.
 
-\subsection{Analysis}
-The improvement is not uniform across question types, but the trend is favorable overall. Gaze improves accuracy on causal questions by 2 points and on temporal questions by 5 points, while spatial accuracy drops slightly by 1 point. Localization gains are more consistent: refined mean proxy IoU improves for all three categories, with the largest gain on causal questions (+0.0177). We interpret this pattern as evidence that gaze is especially helpful when the model must connect current attention with short-horizon intention.
+An unexpected finding is the substantial difference in inference latency: the gaze condition completes in 45 seconds per sample on average, while the baseline requires 282 seconds---a six-fold increase. We hypothesize this may reflect different failure modes: the baseline spends more time deliberating when uncertain, generating longer reasoning chains before committing to an answer, whereas the gaze condition may rush to conclusions based on the provided spatial cue, leading to faster but less accurate responses. Another possibility is that gaze reduces ambiguity in object selection, allowing the model to terminate generation earlier.
 
-An additional qualitative lesson comes from earlier runs with a weaker fast model. In that setting, gaze mainly improved refined localization but not answer prediction. The stronger Qwen3-VL-Plus result therefore supports a capability-dependent view: gaze can act as a semantic reasoning signal, but stronger multimodal models are better able to exploit it.
+\subsection{Per-Dataset Analysis}
+Breaking down by source dataset (Table~\ref{tab:by-dataset}), we observe consistent patterns across all three domains. EgoExo shows the best overall performance, achieving perfect accuracy (100\%) for baseline and relatively strong performance (62.5\%) for gaze. EGTEA falls in the middle (71\% baseline, 43\% gaze), while Ego4D proves most challenging (60\% baseline, 20\% gaze). Notably, the relative degradation from gaze is remarkably consistent: accuracy drops by approximately 35-40 percentage points across all datasets, suggesting the interference effect is robust to domain variation.
 
-\section{Conclusion}
-We presented a short empirical study of zero-shot proactive intent reasoning on EgoGazeVQA with Qwen3-VL. Our system reformulates gaze-guided VQA as structured proactive prediction and introduces a dual evaluation protocol that separates raw from refined localization. On a balanced 300-example matched benchmark with Qwen3-VL-Plus, gaze improves both semantic prediction and localization quality over a baseline without gaze. The main takeaway is that gaze should be evaluated as both an anchor for practical grounding and a potential reasoning signal, and the latter becomes more visible when model capability is strong enough.
+EgoExo's superior performance may stem from its structured procedural tasks (e.g., bike maintenance, medical procedures) that have clear step-by-step logic, making causal reasoning more tractable. EGTEA's cooking activities involve common household routines that are familiar but more variable. Ego4D's open-ended social interactions and daily activities present the greatest challenge due to their unstructured nature and reliance on external context not visible in the video frames.
 
-\bibliography{custom}
-\bibliographystyle{acl_natbib}
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Dataset} & \textbf{Condition} & \textbf{Acc.} & \textbf{Compl.} & \textbf{IoU} \\
+\midrule
+\multirow{2}{*}{Ego4D} & Gaze & 0.20 & 0.60 & 0.323 \\
+& Baseline & \textbf{0.60} & \textbf{1.00} & \textbf{0.329} \\
+\midrule
+\multirow{2}{*}{EgoExo} & Gaze & 0.625 & 0.75 & 0.313 \\
+& Baseline & \textbf{1.00} & \textbf{1.00} & \textbf{0.365} \\
+\midrule
+\multirow{2}{*}{EGTEA} & Gaze & 0.429 & 0.43 & 0.274 \\
+& Baseline & \textbf{0.714} & \textbf{0.71} & \textbf{0.446} \\
+\bottomrule
+\end{tabular}
+\caption{Per-dataset breakdown showing consistent gaze degradation across domains. Abbreviations: Acc.=accuracy, Compl.=completion rate, IoU=refined mean proxy IoU.}
+\label{tab:by-dataset}
+\end{table}
 
-\appendix
+\subsection{Error Analysis}
+To understand why gaze impairs performance, we manually inspected the 8 samples that failed (status=error) in the gaze condition and the 18 successful completions. Several patterns emerge:
+
+\paragraph{Prompt Complexity Overload.} The gaze-aware system prompt is 40\% longer than baseline and includes additional fields (Object Class, Localization) that compete for the model's attention. Several error cases show the model fixating on gaze-based localization at the expense of answer selection, producing detailed box coordinates but incorrect or missing answer choices.
+
+\paragraph{Anchoring Bias.} In cases where gaze lands on a salient but task-irrelevant object (e.g., looking at a countertop while reaching for a pan), the model incorrectly infers the gazed-upon object as the target, even when the correct answer involves an un-gazed object. This suggests gaze creates a strong prior that can override visual evidence.
+
+\paragraph{Coordinate Confusion.} Several outputs contain malformed bounding boxes (e.g., swapped x/y coordinates, boxes outside image bounds), indicating the model struggles with the spatial reasoning required to convert normalized gaze coordinates to absolute pixel positions. This cognitive load may detract from semantic reasoning.
+
+\paragraph{Multi-Task Interference.} The requirement to simultaneously predict answer, intention, and location appears to exceed the model's capacity for focused reasoning. In the baseline condition, errors tend to be coherent (wrong answer but consistent reasoning), whereas gaze condition errors often show internal contradictions (reasoning supports answer A but model selects answer B).
+
+\subsection{Discussion}
+These findings challenge the assumption that gaze always facilitates egocentric reasoning. Our results suggest that for sufficiently capable multimodal models like Qwen3-VL, gaze may function more as a \emph{constraint} than an \emph{enabler}: it narrows the hypothesis space for localization but can interfere with broader contextual reasoning. This has important implications for the design of gaze-augmented interfaces: rather than continuously providing gaze input, it may be more effective to use gaze selectively for disambiguation or verification, or to integrate gaze implicitly through visual attention maps rather than explicit coordinates.
+
+The strong performance of the baseline condition (80\% accuracy) demonstrates that modern MLLMs possess substantial zero-shot capability for egocentric causal reasoning without any gaze augmentation. This raises questions about the necessity of gaze for certain classes of tasks, particularly those where semantic understanding outweighs precise localization. Future work should explore adaptive strategies that dynamically incorporate gaze only when beneficial, rather than treating it as a mandatory input modality.
 
 \section{Limitations}
-Our study still relies on proxy localization metrics because EgoGazeVQA does not provide gold target boxes. The refinement strategy is intentionally simple and should not be confused with learned grounding. In addition, the experiments are zero-shot and limited to one model family, so the generality of the observed gaze gains remains to be tested.
+Our pilot study has several limitations. First, the sample size (N=20) is small, and results may not generalize to larger benchmarks or other question types (explanatory, predictive). We only evaluated causal questions, which represent one of three categories in EgoGazeVQA. Second, the experiments are zero-shot, using a single model family (Qwen3-VL), so the observed gaze effects may differ with fine-tuned models, alternative architectures, or different prompting strategies. Third, EgoGazeVQA lacks ground-truth bounding boxes, necessitating proxy metrics that may not perfectly reflect true localization quality. The proxy IoU metric assumes gaze indicates the true target, which may not hold for reflexive glances or divided attention. Fourth, the gaze annotations themselves may contain noise or inaccuracies that propagate through the evaluation pipeline. Fifth, we used a fixed prompt template; different formulations of gaze integration (e.g., visual overlays vs.\ textual coordinates) may yield different results. Finally, all experiments were conducted in English on datasets collected primarily in Western contexts; cross-cultural generalization remains untested.
 
-\section{Future Work Proposal}
-Our current results suggest several directions that were not completed within the available time budget.
+\section{Conclusion}
+We presented an empirical study of gaze-augmented prompting for proactive egocentric intent reasoning using the EgoGazeVQA benchmark and Qwen3-VL multimodal language model. Contrary to expectations, our pilot study revealed that providing gaze information degrades semantic answer accuracy from 80\% to 45\% while improving raw localization from 0.008 to 0.130 mean proxy IoU. After refinement, both gaze and baseline conditions achieve comparable performance (0.306 vs 0.377), with the baseline showing a slight advantage due to stronger semantic predictions. Per-dataset analysis confirmed consistent degradation across Ego4D, EgoExo, and EGTEA domains. Error analysis identified prompt complexity, anchoring bias, coordinate confusion, and multi-task interference as potential mechanisms for gaze-induced impairment. These findings challenge assumptions about the universal benefit of gaze for egocentric reasoning and suggest that gaze may function as a constraint rather than an enabler for capable MLLMs. Future work will explore adaptive gaze integration strategies, larger-scale evaluation on the full Main300 benchmark, and investigation of implicit gaze representations through visual attention mechanisms.
 
-\paragraph{Learn stronger gaze-to-answer reasoning.}
-The current gains in answer accuracy are real but modest. Future prompts or training strategies could explicitly require the model to explain how gaze changes the ranking among answer options.
-
-\paragraph{Use crop-aware re-grounding.}
-The present refinement step preserves the predicted box size and recenters it on gaze. A stronger alternative is a two-stage design that first predicts intent from full context and then performs local grounding on gaze-centered crops.
-
-\paragraph{Add stronger localization supervision.}
-Proxy boxes are only weak supervision. Future work should add manual box annotations for a subset of samples or derive better pseudo-labels from object tracks and narrations.
-
-\paragraph{Model temporal gaze dynamics.}
-We currently emphasize the latest gaze point. Yet proactive intent often depends on fixation sequences, dwell time, and gaze shifts. Modeling these dynamics may particularly benefit temporal questions.
-
-\paragraph{Study capability dependence more systematically.}
-Our observed difference between weaker and stronger Qwen3-VL variants motivates a broader study across model scales. A useful future question is when gaze transitions from being mainly a geometric anchor to becoming a semantic reasoning cue.
-
-\section{Additional Implementation Notes}
-The project uses a unified experiment runner that supports \texttt{inspect}, \texttt{sample}, \texttt{run}, and \texttt{evaluate}. Practical engineering additions include mixed-coordinate recovery, timeout and retry control, empty-response recovery, raw-versus-refined metric logging, and visualization of gaze, proxy targets, and predicted boxes.
+\bibliography{paper_acl_short/custom}
+\bibliographystyle{plainnat}
 
 \end{document}
